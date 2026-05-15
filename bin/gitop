@@ -1,0 +1,90 @@
+#!/bin/sh
+# gitop — serialize git operations under a per-repo flock.
+#
+# Prevents concurrent processes from racing on .git/index.lock when running
+# git add/commit/push simultaneously (multiple terminals, agents, CI jobs).
+#
+# Usage:
+#   gitop 'git add foo && gitc -m "msg" -- foo && git push'
+#   gitop git status
+#   GITOP_WAIT=10 gitop 'gitc -m "fix" -- file.py'   # fail fast
+#
+# Environment:
+#   GITOP_WAIT          seconds to wait per lock attempt (default: 300)
+#   GITOP_MAX_RETRIES   max retries after timeout (default: 10)
+#   GITOP_HELD          set internally to signal reentrancy; do not set manually
+#
+# Requirements: POSIX sh, git, flock(1) from util-linux
+
+VERSION="0.1.0"
+
+case "${1:-}" in
+    --version|-V) printf 'gitop %s\n' "$VERSION"; exit 0 ;;
+    --help|-h)
+        cat <<'EOF'
+gitop — serialize git operations under a per-repo flock
+
+Usage:
+  gitop 'compound && command'
+  gitop COMMAND [ARGS...]
+
+Options:
+  -h, --help     show this help
+  -V, --version  show version
+
+Environment:
+  GITOP_WAIT        wait seconds per attempt (default: 300)
+  GITOP_MAX_RETRIES max retries after timeout (default: 10)
+
+Examples:
+  gitop 'git add foo.yml && gitc -m "add foo" -- foo.yml && git push'
+  gitop git status
+  GITOP_WAIT=10 gitop 'gitc -m "fix" -- file.py'
+
+See https://github.com/pike00/git-flock for full documentation.
+EOF
+        exit 0
+        ;;
+esac
+
+if [ "$#" -eq 0 ]; then
+    printf 'gitop: no command given. Try: gitop --help\n' >&2
+    exit 1
+fi
+
+# Reentrancy: already inside a gitop window — skip re-locking.
+if [ -n "${GITOP_HELD:-}" ]; then
+    eval "$*"
+    exit $?
+fi
+
+repo=$(git rev-parse --show-toplevel 2>/dev/null) || {
+    printf 'gitop: not in a git repository.\n' >&2
+    exit 1
+}
+
+lockfile="$repo/.git/gitop.lock"
+attempt=0
+
+while true; do
+    GITOP_HELD="$repo" flock -x -w "${GITOP_WAIT:-300}" "$lockfile" -c "$*"
+    rc=$?
+    [ "$rc" -eq 0 ] && exit 0
+
+    if lsof "$lockfile" >/dev/null 2>&1; then
+        attempt=$(( attempt + 1 ))
+        if [ "$attempt" -ge "${GITOP_MAX_RETRIES:-10}" ]; then
+            printf 'gitop: gave up after %d retries on %s\n' "$attempt" "$lockfile" >&2
+            printf '       inspect: lsof %s\n' "$lockfile" >&2
+            exit 1
+        fi
+        printf 'gitop: lock still held after %ss; restarting wait (retry %d)...\n' \
+            "${GITOP_WAIT:-300}" "$attempt" >&2
+    else
+        printf 'gitop: timed out after %ss waiting on %s\n' \
+            "${GITOP_WAIT:-300}" "$lockfile" >&2
+        printf '       another git operation may be in flight in this repo.\n' >&2
+        printf '       inspect: lsof %s\n' "$lockfile" >&2
+        exit 1
+    fi
+done

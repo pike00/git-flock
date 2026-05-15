@@ -1,0 +1,37 @@
+#!/bin/sh
+# gitc — git commit that requires pathspec form (the -- separator).
+#
+# A bare `git commit -m "msg"` absorbs every staged file regardless of intent.
+# Forcing the `--` pathspec separator means the commit contains only the paths
+# you name, leaving any other pre-staged files untouched in the index.
+#
+# This matters most when multiple agents or sessions share the same working
+# tree: each can stage its own files, and `gitc` ensures they don't sweep up
+# each other's work. See git-commit(1) PATHSPEC.
+#
+# Usage:
+#   gitc -m "msg" -- file1 file2
+#   gitc --amend --no-edit -- file1
+
+VERSION="0.1.0"
+
+case "${1:-}" in
+    --version|-V) printf 'gitc %s\n' "$VERSION"; exit 0 ;;
+esac
+
+found_sep=0
+for arg in "$@"; do
+    [ "$arg" = "--" ] && { found_sep=1; break; }
+done
+
+if [ "$found_sep" -eq 0 ]; then
+    printf 'gitc: missing '"'"'--'"'"' separator.\n' >&2
+    printf 'usage: gitc [git-commit-opts] -- <file>...\n' >&2
+    printf '\n' >&2
+    printf 'The -- separator tells git to commit only the listed paths,\n' >&2
+    printf 'leaving other pre-staged files in the index. This prevents\n' >&2
+    printf 'concurrent sessions from absorbing each other'"'"'s staged work.\n' >&2
+    exit 1
+fi
+
+exec git commit "$@"
