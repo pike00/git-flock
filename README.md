@@ -99,6 +99,20 @@ They guard against different failure modes and are useful independently:
 
 Using both together closes both gaps.
 
+## What git-flock does NOT protect
+
+Both tools guard the **commit pipeline** — the window during which the index is staged and a commit is written. Neither protects **uncommitted working-tree changes** from a concurrent *destructive working-tree* operation run by another actor:
+
+- `git reset --hard`
+- `git checkout -- .` / `git restore .`
+- `git clean -fd`
+
+These rewrite the working tree, not `.git/index.lock`, so `gitop`'s serialization never sees them — and even if one were wrapped in `gitop`, it would discard uncommitted work *by design*. No advisory lock can protect one process's unsaved edits from another process that legitimately resets the tree.
+
+**Observed failure (2026-05-29).** Two actors shared one repository: an AI coding agent making a series of *uncommitted* edits to tracked files, and an interactive terminal iterating on an unrelated feature in the same checkout. The terminal ran `git reset --hard` to drop its own in-progress experiment; because `reset --hard` is repo-global, it silently took the agent's uncommitted edits with it. Every actual commit had gone through `gitop`/`gitc` correctly — but no commit was involved here. The loss happened in the working tree, *between* commits, which is exactly the gap these tools do not and cannot cover.
+
+**Mitigation.** When multiple actors share a repository, commit early and often — uncommitted work is the only state git-flock cannot defend. A committed change survives `git reset --hard HEAD` (it discards the working tree and index, not history); an uncommitted one is gone with no reflog entry. If work must stay uncommitted while another actor runs destructive commands, isolate the actors in separate worktrees (`git worktree add`) so a reset in one tree cannot reach another's files.
+
 ## How it works
 
 ### gitop
